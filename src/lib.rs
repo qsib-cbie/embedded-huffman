@@ -40,6 +40,7 @@ pub struct Encoder {
     word_batch: Vec<u8>,
     weights: [u32; SYMBOL_COUNT],
     code_table: Vec<CodeEntry>,
+    done: bool,
     bytes_in: usize,
     bytes_out: usize,
 }
@@ -72,6 +73,7 @@ impl Encoder {
             word_batch: Vec::with_capacity(page_size),
             weights: [1; SYMBOL_COUNT], // always assume each symbol is present at least once
             code_table: Vec::with_capacity(SYMBOL_COUNT),
+            done: false,
             bytes_in: 0,
             bytes_out: 0,
         }
@@ -86,18 +88,24 @@ impl Encoder {
         self.word_batch.clear();
         self.weights.fill(1);
         self.code_table.clear();
+        self.done = false;
         self.bytes_in = 0;
         self.bytes_out = 0;
     }
 
+    /// Get the ratio of bytes in to bytes out
+    pub fn ratio(&self) -> f32 {
+        self.bytes_in as f32 / self.bytes_out as f32
+    }
+
     /// Put a byte into the encoder
     #[inline]
-    pub async fn sink<E>(&mut self, byte: u8, output: &mut impl PageWriter<E>) -> Result<(), E> {
+    pub async fn sink<E>(&mut self, byte: u8, output: &mut impl PageWriter<E>) -> Result<bool, E> {
         self.crank(output, Some(byte)).await
     }
 
     /// Finish encoding and flush any remaining bytes
-    pub async fn flush<E>(&mut self, output: &mut impl PageWriter<E>) -> Result<(), E> {
+    pub async fn flush<E>(&mut self, output: &mut impl PageWriter<E>) -> Result<bool, E> {
         self.crank(output, None).await
     }
 
@@ -105,7 +113,7 @@ impl Encoder {
         &mut self,
         output: &mut impl PageWriter<E>,
         byte: Option<u8>,
-    ) -> Result<(), E> {
+    ) -> Result<bool, E> {
         let finish = if let Some(byte) = byte {
             self.bytes_in += 1;
             self.weights[byte as usize] += 1;
@@ -125,7 +133,7 @@ impl Encoder {
                         self.state = EncodeState::Table;
                         output.reset();
                     } else {
-                        return Ok(());
+                        return Ok(self.done);
                     }
                 }
                 EncodeState::Table => {
@@ -137,7 +145,9 @@ impl Encoder {
                     // Write out bytes
                     self.bytes_out += self.page_size;
                     match output.flush().await {
-                        Ok(()) => {}
+                        Ok(done) => {
+                            self.done |= done;
+                        }
                         Err(e) => {
                             self.state = EncodeState::Error;
                             return Err(e);
@@ -161,7 +171,7 @@ impl Encoder {
                 EncodeState::Data => {
                     // batching is only done for performance reasons ... hypothetically
                     if (self.word_batch.len() < self.page_size) & !finish {
-                        return Ok(());
+                        return Ok(self.done);
                     }
 
                     // write all of the bits in the current batch using the current code table
@@ -183,7 +193,9 @@ impl Encoder {
                         // Move to the next page, writing out this page
                         self.bytes_out += self.page_size;
                         match output.flush().await {
-                            Ok(()) => {}
+                            Ok(done) => {
+                                self.done |= done;
+                            }
                             Err(e) => {
                                 self.state = EncodeState::Error;
                                 return Err(e);
@@ -206,7 +218,10 @@ impl Encoder {
                         // We are done if all the words sunk, emit the final page
                         if finish {
                             self.bytes_out += self.page_size;
-                            return output.flush().await;
+                            return output.flush().await.and_then(|done| {
+                                self.done |= done;
+                                Ok(self.done)
+                            });
                         }
                     }
                 }
@@ -217,7 +232,7 @@ impl Encoder {
 
 #[allow(async_fn_in_trait)]
 pub trait PageWriter<E> {
-    async fn flush(&mut self) -> Result<(), E>;
+    async fn flush(&mut self) -> Result<bool, E>;
 
     fn position(&self) -> usize;
     fn reset(&mut self);
@@ -237,11 +252,13 @@ pub struct BufferedPageWriter<E> {
     bytes: Vec<u8>,
     /// A function that takes a ref to the page and writes it to NAND
     flush_page: WritePageFutureFn<E>,
+    /// Done
+    done: bool,
 }
 
 /// A function that takes a reference to the page and writes it to NAND
 pub type WritePageFutureFn<E> =
-    Box<dyn for<'a> Fn(&'a [u8]) -> Pin<Box<dyn Future<Output = Result<(), E>> + 'a>>>;
+    Box<dyn for<'a> Fn(&'a [u8]) -> Pin<Box<dyn Future<Output = Result<bool, E>> + 'a>>>;
 
 impl<E> BufferedPageWriter<E> {
     pub fn new(page_size: usize, flush: WritePageFutureFn<E>) -> BufferedPageWriter<E> {
@@ -254,6 +271,7 @@ impl<E> BufferedPageWriter<E> {
             bytes: buf,
             bits_written: 0,
             flush_page: flush,
+            done: false,
         }
     }
 }
@@ -372,7 +390,7 @@ impl<E> PageWriter<E> for BufferedPageWriter<E> {
     }
 
     /// flush the current page to nand and reset the page
-    async fn flush(&mut self) -> Result<(), E> {
+    async fn flush(&mut self) -> Result<bool, E> {
         // Flush the remaining bits
         debug_assert!(self.bits.len() < 8); // expecting less than a byte pending otherwise it should have been flushed
         if !self.bits.is_empty() {
@@ -414,11 +432,12 @@ impl<E> PageWriter<E> for BufferedPageWriter<E> {
         self.write_header(self.bits_written as u32);
 
         // Flush the bytes to NAND
-        (*self.flush_page)(&self.bytes).await?;
+        self.done |= !(*self.flush_page)(&self.bytes).await?;
 
         // Start the next page on a clean slate
         self.reset();
-        Ok(())
+
+        Ok(self.done)
     }
 }
 
@@ -641,7 +660,7 @@ impl<E> PageReader<E> for BufferedPageReader<E> {
             self.bytes.fill(0xFF);
             return Ok(&self.bytes);
         }
-        self.done = !(*self.read_page)(&mut self.bytes).await?;
+        self.done |= !(*self.read_page)(&mut self.bytes).await?;
         Ok(&self.bytes)
     }
 
@@ -689,7 +708,7 @@ mod tests {
         let flush: WritePageFutureFn<()> = Box::new(|page: &[u8]| {
             Box::pin(async move {
                 std::dbg!("flush", page.len());
-                Ok(())
+                Ok(true)
             })
         });
 
@@ -704,7 +723,7 @@ mod tests {
         let flush: WritePageFutureFn<()> = Box::new(|page| {
             Box::pin(async move {
                 std::dbg!("flush", page.len());
-                Ok(())
+                Ok(true)
             })
         });
         let mut wtr = BufferedPageWriter::new(2048, flush);
@@ -718,7 +737,7 @@ mod tests {
         let flush: WritePageFutureFn<()> = Box::new(|page| {
             Box::pin(async move {
                 std::dbg!("flush", page.len());
-                Ok(())
+                Ok(true)
             })
         });
         let mut wtr = BufferedPageWriter::new(2048, flush);
@@ -733,7 +752,7 @@ mod tests {
 
     #[test]
     fn test_compress_multi_page() {
-        let flush: WritePageFutureFn<()> = Box::new(|_page| Box::pin(async move { Ok(()) }));
+        let flush: WritePageFutureFn<()> = Box::new(|_page| Box::pin(async move { Ok(true) }));
         let mut wtr = BufferedPageWriter::new(2048, flush);
         let mut encoder = Encoder::new(2048, 4);
 
@@ -762,7 +781,7 @@ mod tests {
             Box::pin(async move {
                 let mut buf = buf.borrow_mut();
                 buf.extend_from_slice(page);
-                Ok(())
+                Ok(true)
             })
         });
         const PAGE_SIZE: usize = 2048;

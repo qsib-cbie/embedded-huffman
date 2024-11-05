@@ -22,7 +22,7 @@ fn compress(bencher: Bencher) {
         Box::pin(async move {
             let mut buf = buf.borrow_mut();
             buf.extend_from_slice(page);
-            Ok(())
+            Ok(true)
         })
     });
 
@@ -63,7 +63,7 @@ fn decompress(bencher: Bencher) {
         Box::pin(async move {
             let mut buf = buf.borrow_mut();
             buf.extend_from_slice(page);
-            Ok(())
+            Ok(true)
         })
     });
 

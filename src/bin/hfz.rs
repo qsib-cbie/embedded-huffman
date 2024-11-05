@@ -116,7 +116,7 @@ fn main() {
             Box::pin(async move {
                 let stdout = io::stdout();
                 let mut stdout = stdout.lock();
-                stdout.write_all(page).map_err(|e| e)
+                stdout.write_all(page).map_err(|e| e).and_then(|_| Ok(true))
             })
         });
 
