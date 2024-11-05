@@ -15,7 +15,7 @@ fuzz_target!(|data: &[u8]| {
     let rdr_buf = buf.clone();
 
     // Encoding
-    let flush_page: FlushFutureFn<()> = Box::new(move |page| {
+    let flush_page: WritePageFutureFn<()> = Box::new(move |page| {
         let buf = wtr_buf.clone();
         Box::pin(async move {
             let mut buf = buf.borrow_mut();
@@ -34,14 +34,15 @@ fuzz_target!(|data: &[u8]| {
             assert!(buf.len() % PAGE_SIZE == 0);
             if buf.is_empty() {
                 page.fill(0xFF);
+                Ok(false)
             } else {
                 let drained = buf.drain(..PAGE_SIZE);
                 page[..drained.len()]
                     .iter_mut()
                     .zip(drained)
                     .for_each(|(p, b)| *p = b);
+                Ok(true)
             }
-            Ok(())
         })
     });
     let mut rdr = BufferedPageReader::new(PAGE_SIZE, read_page);
