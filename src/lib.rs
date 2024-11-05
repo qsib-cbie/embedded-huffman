@@ -236,15 +236,15 @@ pub struct BufferedPageWriter<E> {
     /// A page of bytes that need to be flushed to NAND
     bytes: Vec<u8>,
     /// A function that takes a ref to the page and writes it to NAND
-    flush_page: FlushFutureFn<E>,
+    flush_page: WritePageFutureFn<E>,
 }
 
-/// A function that takes a mutable reference to the page, writes it to NAND, and returns it back
-pub type FlushFutureFn<E> =
+/// A function that takes a reference to the page and writes it to NAND
+pub type WritePageFutureFn<E> =
     Box<dyn for<'a> Fn(&'a [u8]) -> Pin<Box<dyn Future<Output = Result<(), E>> + 'a>>>;
 
 impl<E> BufferedPageWriter<E> {
-    pub fn new(page_size: usize, flush: FlushFutureFn<E>) -> BufferedPageWriter<E> {
+    pub fn new(page_size: usize, flush: WritePageFutureFn<E>) -> BufferedPageWriter<E> {
         // Allocate a buffer for the page
         let mut buf: Vec<u8> = Vec::with_capacity(page_size);
         unsafe { buf.set_len(page_size) };
@@ -613,29 +613,42 @@ pub struct BufferedPageReader<E> {
     bytes: Vec<u8>,
     /// A function that fills a buffer with a page from NAND
     read_page: ReadPageFutureFn<E>,
+    /// Done
+    done: bool,
 }
 
-/// A function that takes a mutable reference to the page, reads it from NAND, and returns it back
+/// A function that takes a mutable reference to the page and fills it with bytes from NAND
+/// The future returns true if there are more pages that could be read
 pub type ReadPageFutureFn<E> =
-    Box<dyn for<'a> Fn(&'a mut [u8]) -> Pin<Box<dyn Future<Output = Result<(), E>> + 'a>>>;
+    Box<dyn for<'a> Fn(&'a mut [u8]) -> Pin<Box<dyn Future<Output = Result<bool, E>> + 'a>>>;
 
 impl<E> BufferedPageReader<E> {
     pub fn new(page_size: usize, read_page: ReadPageFutureFn<E>) -> BufferedPageReader<E> {
         let mut bytes = Vec::with_capacity(page_size);
         unsafe { bytes.set_len(page_size) };
-        BufferedPageReader { bytes, read_page }
+        BufferedPageReader {
+            bytes,
+            read_page,
+            done: false,
+        }
     }
 }
 
 impl<E> PageReader<E> for BufferedPageReader<E> {
     /// Fetch page bytes from NAND and provide a reference to them
     async fn read_page(&mut self) -> Result<&[u8], E> {
-        (*self.read_page)(&mut self.bytes).await?;
+        if self.done {
+            self.bytes.fill(0xFF);
+            return Ok(&self.bytes);
+        }
+        self.done = !(*self.read_page)(&mut self.bytes).await?;
         Ok(&self.bytes)
     }
 
     /// Reset the reader to start a new round of reading pages
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.done = false;
+    }
 }
 
 /// Decompression errors can be malformed data or the error from the FutureFn
@@ -673,7 +686,7 @@ mod tests {
     #[test]
     fn test_flush_fn() {
         let mut buf = [1, 3, 5, 7];
-        let flush: FlushFutureFn<()> = Box::new(|page: &[u8]| {
+        let flush: WritePageFutureFn<()> = Box::new(|page: &[u8]| {
             Box::pin(async move {
                 std::dbg!("flush", page.len());
                 Ok(())
@@ -688,7 +701,7 @@ mod tests {
 
     #[test]
     fn test_page_writer_advance() {
-        let flush: FlushFutureFn<()> = Box::new(|page| {
+        let flush: WritePageFutureFn<()> = Box::new(|page| {
             Box::pin(async move {
                 std::dbg!("flush", page.len());
                 Ok(())
@@ -702,7 +715,7 @@ mod tests {
 
     #[test]
     fn test_compress_simple() {
-        let flush: FlushFutureFn<()> = Box::new(|page| {
+        let flush: WritePageFutureFn<()> = Box::new(|page| {
             Box::pin(async move {
                 std::dbg!("flush", page.len());
                 Ok(())
@@ -720,7 +733,7 @@ mod tests {
 
     #[test]
     fn test_compress_multi_page() {
-        let flush: FlushFutureFn<()> = Box::new(|_page| Box::pin(async move { Ok(()) }));
+        let flush: WritePageFutureFn<()> = Box::new(|_page| Box::pin(async move { Ok(()) }));
         let mut wtr = BufferedPageWriter::new(2048, flush);
         let mut encoder = Encoder::new(2048, 4);
 
@@ -744,7 +757,7 @@ mod tests {
         let buf = Rc::new(RefCell::new(buf));
         let wtr_buf = buf.clone();
         let rdr_buf = buf.clone();
-        let flush_page: FlushFutureFn<()> = Box::new(move |page| {
+        let flush_page: WritePageFutureFn<()> = Box::new(move |page| {
             let buf = wtr_buf.clone();
             Box::pin(async move {
                 let mut buf = buf.borrow_mut();
@@ -763,14 +776,15 @@ mod tests {
                 assert!(buf.len() % PAGE_SIZE == 0);
                 if buf.is_empty() {
                     page.fill(0xFF);
+                    Ok(false)
                 } else {
                     let drained = buf.drain(..PAGE_SIZE);
                     page[..drained.len()]
                         .iter_mut()
                         .zip(drained)
                         .for_each(|(p, b)| *p = b);
+                    Ok(true)
                 }
-                Ok(())
             })
         });
         let mut rdr = BufferedPageReader::new(PAGE_SIZE, read_page);

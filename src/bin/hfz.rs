@@ -11,7 +11,7 @@ extern crate alloc;
 extern crate smol;
 
 use embedded_huffman::{
-    BufferedPageReader, BufferedPageWriter, Decoder, Encoder, FlushFutureFn, ReadPageFutureFn,
+    BufferedPageReader, BufferedPageWriter, Decoder, Encoder, ReadPageFutureFn, WritePageFutureFn,
 };
 use std::io::{self, Read, Write};
 use std::process;
@@ -91,13 +91,13 @@ fn main() {
                         Ok(0) => {
                             // EOF reached, fill rest with 0xFF
                             page[bytes_read..].fill(0xFF);
-                            break;
+                            return Ok(false);
                         }
                         Ok(n) => bytes_read += n,
                         Err(e) => return Err(e),
                     }
                 }
-                Ok(())
+                Ok(true)
             })
         });
 
@@ -112,7 +112,7 @@ fn main() {
             }
         });
     } else {
-        let flush_page: FlushFutureFn<io::Error> = Box::new(move |page| {
+        let flush_page: WritePageFutureFn<io::Error> = Box::new(move |page| {
             Box::pin(async move {
                 let stdout = io::stdout();
                 let mut stdout = stdout.lock();

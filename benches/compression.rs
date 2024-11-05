@@ -17,7 +17,7 @@ fn compress(bencher: Bencher) {
     let buf = Rc::new(RefCell::new(buf));
     let wtr_buf = buf.clone();
 
-    let flush_page: FlushFutureFn<()> = Box::new(move |page| {
+    let flush_page: WritePageFutureFn<()> = Box::new(move |page| {
         let buf = wtr_buf.clone();
         Box::pin(async move {
             let mut buf = buf.borrow_mut();
@@ -58,7 +58,7 @@ fn decompress(bencher: Bencher) {
     let wtr_buf = buf.clone();
     let rdr_buf = buf.clone();
 
-    let flush_page: FlushFutureFn<()> = Box::new(move |page| {
+    let flush_page: WritePageFutureFn<()> = Box::new(move |page| {
         let buf = wtr_buf.clone();
         Box::pin(async move {
             let mut buf = buf.borrow_mut();
@@ -79,14 +79,15 @@ fn decompress(bencher: Bencher) {
             assert!(buf.len() % PAGE_SIZE == 0);
             if buf.is_empty() {
                 page.fill(0xFF);
+                Ok(false)
             } else {
                 let drained = buf.drain(..PAGE_SIZE);
                 page[..drained.len()]
                     .iter_mut()
                     .zip(drained)
                     .for_each(|(p, b)| *p = b);
+                Ok(true)
             }
-            Ok(())
         })
     });
 
