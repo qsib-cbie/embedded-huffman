@@ -2,6 +2,15 @@
 name = "embedded-huffman"
 version = "0.1.0"
 edition = "2021"
+authors = ["Jacob Trueb <jtrueb@northwestern.edu>"]
+description = "A paginated, streaming library for Huffman coding on embedded."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/qsib-cbie/embedded-heatshrink"
+homepage = "https://github.com/qsib-cbie/embedded-heatshrink"
+documentation = "https://docs.rs/embedded-heatshrink"
+keywords = ["compression", "embedded", "no_std", "huffman", "alloc"]
+categories = ["embedded", "compression", "no-std"]
+readme = "README.md"
 
 [lib]
 crate-type = ["rlib"]
