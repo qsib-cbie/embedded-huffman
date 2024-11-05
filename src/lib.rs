@@ -1,6 +1,6 @@
 #![no_std]
 extern crate alloc;
-#[cfg(feature = "std")]
+#[cfg(any(feature = "std", test))]
 extern crate std;
 
 ///!
@@ -160,14 +160,15 @@ impl Encoder {
                 }
                 EncodeState::Data => {
                     // batching is only done for performance reasons ... hypothetically
-                    if (self.word_batch.len() < self.page_size) && !finish {
+                    if (self.word_batch.len() < self.page_size) & !finish {
                         return Ok(());
                     }
 
                     // write all of the bits in the current batch using the current code table
                     let mut drain = None;
                     for (idx, byte) in self.word_batch.iter().enumerate() {
-                        let code = &self.code_table[*byte as usize];
+                        let code = unsafe { self.code_table.get_unchecked(*byte as usize) };
+
                         // If the word does not fit in the current page, then we need to advance pages
                         if !output.write_code(code) {
                             drain = Some(idx);
@@ -423,6 +424,7 @@ impl<E> PageWriter<E> for BufferedPageWriter<E> {
 
 /// A huffman decoder that reads successive tables and data from pages
 pub struct Decoder {
+    page_size: usize,
     page_threshold: usize,
     page_threshold_limit: usize,
     page_count: usize,
@@ -441,6 +443,8 @@ enum DecodeState {
     Data,
     /// There are no more pages to read
     Done,
+    /// There was an error in the encoder or malformed data
+    Error,
 }
 
 impl Decoder {
@@ -448,6 +452,7 @@ impl Decoder {
     /// Every `page_threshold` pages, the decoder will rebuild the huffman tree
     pub fn new(page_size: usize, page_threshold: usize) -> Decoder {
         Decoder {
+            page_size,
             page_threshold: 1,
             page_threshold_limit: page_threshold,
             page_count: 0,
@@ -470,7 +475,10 @@ impl Decoder {
     }
 
     /// Drain a byte from the decoder
-    pub async fn drain<E>(&mut self, input: &mut impl PageReader<E>) -> Result<Option<u8>, E> {
+    pub async fn drain<E>(
+        &mut self,
+        input: &mut impl PageReader<E>,
+    ) -> Result<Option<u8>, DecompressionError<E>> {
         // If there are already decoded bytes in the buffer, return them
         if self.emitted_idx < self.decoded_bytes.len() {
             let byte = if cfg!(test) {
@@ -486,6 +494,9 @@ impl Decoder {
             match self.state {
                 DecodeState::Done => {
                     return Ok(None);
+                }
+                DecodeState::Error => {
+                    return Err(DecompressionError::Bad);
                 }
                 DecodeState::Table => {
                     // Read the page and check if this is the last page
@@ -527,29 +538,37 @@ impl Decoder {
                     // Push page bits through the trie to get symbols
                     let symbol_lookup = self.decoder_trie.as_mut().unwrap();
                     let bits_written = u32::from_le_bytes(page[..4].try_into().unwrap());
+
+                    // The number of bits written to a page must be valid
+                    if !(32..=self.page_size * 8).contains(&(bits_written as usize)) {
+                        self.state = DecodeState::Error;
+                        return Err(DecompressionError::Bad);
+                    }
+
                     let bytes_written = ((bits_written + 7) / 8) as usize;
                     let page_bytes = &page[4..bytes_written];
-                    let mut bits_read = 32;
-                    for &byte in page_bytes {
-                        let bits = [
-                            (byte >> 7) & 1,
-                            (byte >> 6) & 1,
-                            (byte >> 5) & 1,
-                            (byte >> 4) & 1,
-                            (byte >> 3) & 1,
-                            (byte >> 2) & 1,
-                            (byte >> 1) & 1,
-                            byte & 1,
-                        ];
-                        bits_read += 8;
-                        let bits_to_process = if bits_read <= bits_written {
-                            &bits[..]
-                        } else {
-                            &bits[..(bits_written + 8 - bits_read) as usize]
-                        };
-                        for &bit in bits_to_process {
-                            if let Some(symbol) = symbol_lookup.next(bit) {
-                                self.decoded_bytes.push(symbol);
+
+                    if !page_bytes.is_empty() {
+                        let mut bits_read = 32;
+                        let full_bytes = page_bytes.len() - 1;
+                        for &byte in &page_bytes[..full_bytes] {
+                            for i in (0..8).rev() {
+                                let bit = (byte >> i) & 1;
+                                if let Some(symbol) = symbol_lookup.next(bit) {
+                                    self.decoded_bytes.push(symbol);
+                                }
+                            }
+                        }
+                        bits_read += full_bytes as u32 * 8;
+
+                        // Process final byte which may be partial
+                        if let Some(&last_byte) = page_bytes.last() {
+                            let remaining_bits = (bits_written + 8 - bits_read) as usize;
+                            for i in (0..8).rev().take(remaining_bits) {
+                                let bit = (last_byte >> i) & 1;
+                                if let Some(symbol) = symbol_lookup.next(bit) {
+                                    self.decoded_bytes.push(symbol);
+                                }
                             }
                         }
                     }
@@ -619,8 +638,20 @@ impl<E> PageReader<E> for BufferedPageReader<E> {
     fn reset(&mut self) {}
 }
 
-#[cfg(test)]
-extern crate std;
+/// Decompression errors can be malformed data or the error from the FutureFn
+#[derive(Debug, Clone, Copy)]
+pub enum DecompressionError<E> {
+    /// The data is malformed or you kept calling drain after Bad occurred
+    Bad,
+    /// The error from the FutureFn
+    Load(E),
+}
+impl<E> From<E> for DecompressionError<E> {
+    fn from(err: E) -> Self {
+        DecompressionError::Load(err)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

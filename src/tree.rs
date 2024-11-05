@@ -143,6 +143,7 @@ impl CodeLookupTrie {
     /// This allows us to decode a stream of bits into symbols by calling next() repeatedly
     /// with each bit in the stream. When we reach a leaf node, we get the decoded symbol
     /// and automatically reset back to the root for the next symbol.
+    #[inline(always)]
     pub fn next(&mut self, bit: u8) -> Option<u8> {
         debug_assert!(bit == 0 || bit == 1); // too expensive in release mode
 

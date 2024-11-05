@@ -27,3 +27,8 @@ smol = { version = "2.0.2", optional = true }
 [dev-dependencies]
 smol = "2.0.2"
 humanize-bytes = "1.0.6"
+divan = "0.1.15"
+
+[[bench]]
+name = "compression"
+harness = false
