@@ -563,7 +563,7 @@ impl Decoder {
 
                         // Process final byte which may be partial
                         if let Some(&last_byte) = page_bytes.last() {
-                            let remaining_bits = (bits_written + 8 - bits_read) as usize;
+                            let remaining_bits = (bits_written - bits_read) as usize;
                             for i in (0..8).rev().take(remaining_bits) {
                                 let bit = (last_byte >> i) & 1;
                                 if let Some(symbol) = symbol_lookup.next(bit) {
