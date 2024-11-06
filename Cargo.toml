@@ -32,3 +32,7 @@ divan = "0.1.15"
 [[bench]]
 name = "compression"
 harness = false
+
+[[bin]]
+name = "hfz"
+required-features = ["cli"]
