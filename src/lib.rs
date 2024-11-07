@@ -54,7 +54,9 @@ pub struct Encoder {
     code_table: Vec<CodeEntry>,
     visit_deque: VecDeque<(Node, Vec<usize>)>,
     done: bool,
+    #[cfg(feature = "ratio")]
     bytes_in: usize,
+    #[cfg(feature = "ratio")]
     bytes_out: usize,
 }
 
@@ -88,7 +90,9 @@ impl Encoder {
             code_table: Vec::with_capacity(SYMBOL_COUNT),
             visit_deque: VecDeque::with_capacity(SYMBOL_COUNT * 2 - 1),
             done: false,
+            #[cfg(feature = "ratio")]
             bytes_in: 0,
+            #[cfg(feature = "ratio")]
             bytes_out: 0,
         }
     }
@@ -103,11 +107,15 @@ impl Encoder {
         self.weights.fill(1);
         self.code_table.clear();
         self.done = false;
-        self.bytes_in = 0;
-        self.bytes_out = 0;
+        #[cfg(feature = "ratio")]
+        {
+            self.bytes_in = 0;
+            self.bytes_out = 0;
+        }
     }
 
     /// Get the ratio of bytes in to bytes out
+    #[cfg(feature = "ratio")]
     pub fn ratio(&self) -> f32 {
         self.bytes_in as f32 / self.bytes_out as f32
     }
@@ -131,14 +139,16 @@ impl Encoder {
     ) -> Result<bool, E> {
         let finish = if let Some(byte) = byte {
             // Optimized for Cortex-M4 where there is no branch prediction
-            self.bytes_in += 1;
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "ratio")]
             {
-                // false positive on undefined behavior bounds checking on slice indexing
+                self.bytes_in += 1;
+            }
+            #[cfg(test)]
+            {
                 self.weights[byte as usize] += 1;
                 self.word_batch.push(byte);
             }
-            #[cfg(not(debug_assertions))]
+            #[cfg(not(test))]
             {
                 unsafe {
                     *self.weights.get_unchecked_mut(byte as usize) += 1;
@@ -178,7 +188,10 @@ impl Encoder {
                     }
 
                     // Write out bytes
-                    self.bytes_out += self.page_size;
+                    #[cfg(feature = "ratio")]
+                    {
+                        self.bytes_out += self.page_size;
+                    }
                     match output.flush().await {
                         Ok(done) => {
                             self.done |= done;
@@ -226,7 +239,10 @@ impl Encoder {
                         self.word_batch.drain(..drain);
 
                         // Move to the next page, writing out this page
-                        self.bytes_out += self.page_size;
+                        #[cfg(feature = "ratio")]
+                        {
+                            self.bytes_out += self.page_size;
+                        }
                         match output.flush().await {
                             Ok(done) => {
                                 self.done |= done;
@@ -252,7 +268,10 @@ impl Encoder {
 
                         // We are done if all the words sunk, emit the final page
                         if finish {
-                            self.bytes_out += self.page_size;
+                            #[cfg(feature = "ratio")]
+                            {
+                                self.bytes_out += self.page_size;
+                            }
                             return output.flush().await.and_then(|done| {
                                 self.done |= done;
                                 Ok(self.done)
@@ -820,11 +839,14 @@ mod tests {
             encoder.flush(&mut wtr).await.unwrap();
         });
 
-        std::dbg!(
-            encoder.bytes_in,
-            encoder.bytes_out,
-            encoder.bytes_in as f32 / encoder.bytes_out as f32
-        );
+        #[cfg(feature = "ratio")]
+        {
+            std::dbg!(
+                encoder.bytes_in,
+                encoder.bytes_out,
+                encoder.bytes_in as f32 / encoder.bytes_out as f32
+            );
+        }
     }
 
     #[test]
@@ -901,6 +923,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         ];
 
+        #[cfg(feature = "ratio")]
         let mut compression_ratios = Vec::new();
         for (test_case, test_data) in test_cases.into_iter().enumerate() {
             std::dbg!(test_case);
@@ -932,11 +955,14 @@ mod tests {
                 std::dbg!(header);
             }
 
-            compression_ratios.push((
-                encoder.bytes_in as f32 / encoder.bytes_out as f32,
-                humanize_bytes::humanize_bytes_binary!(encoder.bytes_in),
-                humanize_bytes::humanize_bytes_binary!(encoder.bytes_out),
-            ));
+            #[cfg(feature = "ratio")]
+            {
+                compression_ratios.push((
+                    encoder.bytes_in as f32 / encoder.bytes_out as f32,
+                    humanize_bytes::humanize_bytes_binary!(encoder.bytes_in),
+                    humanize_bytes::humanize_bytes_binary!(encoder.bytes_out),
+                ));
+            }
 
             // Read bytes from the decoder
             smol::block_on(async {
@@ -952,6 +978,10 @@ mod tests {
                 assert_eq!(idx, test_data.len());
             });
         }
-        std::dbg!(compression_ratios);
+
+        #[cfg(feature = "ratio")]
+        {
+            std::dbg!(compression_ratios);
+        }
     }
 }
