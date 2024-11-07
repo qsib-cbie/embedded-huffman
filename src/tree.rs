@@ -11,7 +11,7 @@ use crate::SYMBOL_COUNT;
 /// A list of bits that represent a symbol in the Huffman tree
 #[derive(Default, Debug, Clone)]
 pub struct CodeEntry {
-    pub bits: Vec<u8>,
+    pub bits: Vec<usize>,
 }
 
 pub enum Node {
@@ -90,14 +90,17 @@ pub fn build_tree(weights: &[u32; SYMBOL_COUNT]) -> Node {
 }
 
 // Build the code table for bit representation of the tree
-pub fn build_code_table(root: Node, code_table: &mut [CodeEntry]) {
+pub fn build_code_table(
+    root: Node,
+    code_table: &mut [CodeEntry],
+    visit_deque: &mut VecDeque<(Node, Vec<usize>)>,
+) {
     let code_table: &mut [CodeEntry; SYMBOL_COUNT] =
         (&mut code_table[..SYMBOL_COUNT]).try_into().unwrap();
 
     // Build the code table
-    let mut to_visit = VecDeque::with_capacity(SYMBOL_COUNT * 2 - 1);
-    to_visit.push_back((root, vec![]));
-    while let Some((node, mut bits)) = to_visit.pop_front() {
+    visit_deque.push_back((root, vec![]));
+    while let Some((node, mut bits)) = visit_deque.pop_front() {
         match node {
             Node::Leaf(leaf) => {
                 code_table[leaf.word as usize].bits = bits;
@@ -108,16 +111,12 @@ pub fn build_code_table(root: Node, code_table: &mut [CodeEntry]) {
                 let mut right_bits = bits;
                 left_bits.push(0);
                 right_bits.push(1);
-                to_visit.push_back((*internal.left, left_bits));
-                to_visit.push_back((*internal.right, right_bits));
+                visit_deque.push_back((*internal.left, left_bits));
+                visit_deque.push_back((*internal.right, right_bits));
             }
         }
     }
-
-    // Drop unused space, code tables live a long time
-    for entry in code_table {
-        entry.bits.shrink_to_fit();
-    }
+    visit_deque.clear();
 }
 
 /// A structure for iterating bit by bit through consecutive CodeEntries

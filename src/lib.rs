@@ -19,9 +19,11 @@ extern crate std;
 ///! encoder and decoder to adapt to changes int the sensor data.
 ///!
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::Pin;
+use core::ptr::copy_nonoverlapping;
 
 mod tree;
 use tree::*;
@@ -29,6 +31,16 @@ use tree::*;
 /// The Huffman code is built from bytes, so the symbol count is 2^8
 const WORD_SIZE: usize = 8;
 const SYMBOL_COUNT: usize = 1 << WORD_SIZE;
+
+// Predefined bit shifts to remove some of the bit shifting
+static PRESHIFTED7: [u8; 2] = [0b0000_0000, 0b1000_0000];
+static PRESHIFTED6: [u8; 2] = [0b0000_0000, 0b0100_0000];
+static PRESHIFTED5: [u8; 2] = [0b0000_0000, 0b0010_0000];
+static PRESHIFTED4: [u8; 2] = [0b0000_0000, 0b0001_0000];
+static PRESHIFTED3: [u8; 2] = [0b0000_0000, 0b0000_1000];
+static PRESHIFTED2: [u8; 2] = [0b0000_0000, 0b0000_0100];
+static PRESHIFTED1: [u8; 2] = [0b0000_0000, 0b0000_0010];
+static PRESHIFTED0: [u8; 2] = [0b0000_0000, 0b0000_0001];
 
 /// A huffman encoder that writes successive tables and data to pages
 pub struct Encoder {
@@ -40,6 +52,7 @@ pub struct Encoder {
     word_batch: Vec<u8>,
     weights: [u32; SYMBOL_COUNT],
     code_table: Vec<CodeEntry>,
+    visit_deque: VecDeque<(Node, Vec<usize>)>,
     done: bool,
     bytes_in: usize,
     bytes_out: usize,
@@ -73,6 +86,7 @@ impl Encoder {
             word_batch: Vec::with_capacity(page_size),
             weights: [1; SYMBOL_COUNT], // always assume each symbol is present at least once
             code_table: Vec::with_capacity(SYMBOL_COUNT),
+            visit_deque: VecDeque::with_capacity(SYMBOL_COUNT * 2 - 1),
             done: false,
             bytes_in: 0,
             bytes_out: 0,
@@ -99,7 +113,7 @@ impl Encoder {
     }
 
     /// Put a byte into the encoder
-    #[inline]
+    #[inline(always)]
     pub async fn sink<E>(&mut self, byte: u8, output: &mut impl PageWriter<E>) -> Result<bool, E> {
         self.crank(output, Some(byte)).await
     }
@@ -109,15 +123,27 @@ impl Encoder {
         self.crank(output, None).await
     }
 
+    #[inline(always)]
     async fn crank<E>(
         &mut self,
         output: &mut impl PageWriter<E>,
         byte: Option<u8>,
     ) -> Result<bool, E> {
         let finish = if let Some(byte) = byte {
-            self.bytes_in += 1;
-            self.weights[byte as usize] += 1;
-            self.word_batch.push(byte);
+            // Optimized for Cortex-M4 where there is no branch prediction
+            unsafe {
+                self.bytes_in += 1;
+                *self.weights.get_unchecked_mut(byte as usize) += 1;
+                let idx = self.word_batch.len();
+                *self.word_batch.get_unchecked_mut(idx) = byte;
+                self.word_batch.set_len(idx + 1);
+            }
+
+            // Hot path for encoding data
+            if matches!(self.state, EncodeState::Data) & (self.word_batch.len() < self.page_size) {
+                return Ok(self.done);
+            }
+
             false
         } else {
             true
@@ -160,7 +186,7 @@ impl Encoder {
                     // Create the bit representation of the tree
                     self.code_table.clear();
                     self.code_table.resize(SYMBOL_COUNT, Default::default());
-                    build_code_table(root, &mut self.code_table);
+                    build_code_table(root, &mut self.code_table, &mut self.visit_deque);
 
                     // Always assume each symbol is present at least once
                     self.weights.fill(1);
@@ -247,7 +273,7 @@ pub struct BufferedPageWriter<E> {
     /// Pre-calculated page size in bits
     page_size: usize,
     /// Vec<bool> pre-cast to u8, representing bits that need to be chunked into bytes
-    bits: Vec<u8>,
+    bits: Vec<usize>,
     /// A page of bytes that need to be flushed to NAND
     bytes: Vec<u8>,
     /// A function that takes a ref to the page and writes it to NAND
@@ -292,7 +318,15 @@ impl<E> PageWriter<E> for BufferedPageWriter<E> {
     #[inline(always)]
     fn write_header(&mut self, header: u32) {
         let bits_written_header = header.to_le_bytes();
-        self.bytes[..bits_written_header.len()].copy_from_slice(&bits_written_header);
+        // Safe version:
+        // self.bytes[..bits_written_header.len()].copy_from_slice(&bits_written_header);
+        unsafe {
+            copy_nonoverlapping(
+                bits_written_header.as_ptr(),
+                self.bytes.as_mut_ptr(),
+                bits_written_header.len(),
+            );
+        }
     }
 
     /// append a u32 value to the page
@@ -302,7 +336,15 @@ impl<E> PageWriter<E> for BufferedPageWriter<E> {
         debug_assert!(self.bits.len() == 0);
         let bytes = value.to_le_bytes();
         let offset = self.bits_written / 8;
-        self.bytes[offset..offset + bytes.len()].copy_from_slice(&bytes);
+        // Safe version:
+        // self.bytes[offset..offset + bytes.len()].copy_from_slice(&bytes);
+        unsafe {
+            copy_nonoverlapping(
+                bytes.as_ptr(),
+                self.bytes.as_mut_ptr().add(offset),
+                bytes.len(),
+            );
+        }
         self.bits_written += bytes.len() * 8;
     }
 
@@ -322,15 +364,17 @@ impl<E> PageWriter<E> for BufferedPageWriter<E> {
 
                 // Convert the bits to bytes
                 for byte_bits in self.bits.chunks_exact(8) {
-                    let byte_bits: [u8; 8] = unsafe { byte_bits.try_into().unwrap_unchecked() };
-                    let byte = (byte_bits[0] << 7)
-                        | (byte_bits[1] << 6)
-                        | (byte_bits[2] << 5)
-                        | (byte_bits[3] << 4)
-                        | (byte_bits[4] << 3)
-                        | (byte_bits[5] << 2)
-                        | (byte_bits[6] << 1)
-                        | byte_bits[7];
+                    let byte_bits: &[usize; 8] = unsafe { byte_bits.try_into().unwrap_unchecked() };
+                    let byte = unsafe {
+                        PRESHIFTED7.get_unchecked(byte_bits[0])
+                            | PRESHIFTED6.get_unchecked(byte_bits[1])
+                            | PRESHIFTED5.get_unchecked(byte_bits[2])
+                            | PRESHIFTED4.get_unchecked(byte_bits[3])
+                            | PRESHIFTED3.get_unchecked(byte_bits[4])
+                            | PRESHIFTED2.get_unchecked(byte_bits[5])
+                            | PRESHIFTED1.get_unchecked(byte_bits[6])
+                            | PRESHIFTED0.get_unchecked(byte_bits[7])
+                    };
                     let offset = self.bits_written / 8;
                     #[cfg(test)]
                     {
@@ -360,15 +404,17 @@ impl<E> PageWriter<E> for BufferedPageWriter<E> {
         let mut drained = 0;
         for byte_bits in self.bits.chunks_exact(8) {
             drained += 8;
-            let byte_bits: [u8; 8] = unsafe { byte_bits.try_into().unwrap_unchecked() };
-            let byte = (byte_bits[0] << 7)
-                | (byte_bits[1] << 6)
-                | (byte_bits[2] << 5)
-                | (byte_bits[3] << 4)
-                | (byte_bits[4] << 3)
-                | (byte_bits[5] << 2)
-                | (byte_bits[6] << 1)
-                | byte_bits[7];
+            let byte_bits: &[usize; 8] = unsafe { byte_bits.try_into().unwrap_unchecked() };
+            let byte = unsafe {
+                PRESHIFTED7.get_unchecked(byte_bits[0])
+                    | PRESHIFTED6.get_unchecked(byte_bits[1])
+                    | PRESHIFTED5.get_unchecked(byte_bits[2])
+                    | PRESHIFTED4.get_unchecked(byte_bits[3])
+                    | PRESHIFTED3.get_unchecked(byte_bits[4])
+                    | PRESHIFTED2.get_unchecked(byte_bits[5])
+                    | PRESHIFTED1.get_unchecked(byte_bits[6])
+                    | PRESHIFTED0.get_unchecked(byte_bits[7])
+            };
             let offset = self.bits_written / 8;
             #[cfg(test)]
             {
@@ -400,15 +446,17 @@ impl<E> PageWriter<E> for BufferedPageWriter<E> {
 
             // Convert the bits to bytes
             for byte_bits in self.bits.chunks_exact(8) {
-                let byte_bits: [u8; 8] = unsafe { byte_bits.try_into().unwrap_unchecked() };
-                let byte = (byte_bits[0] << 7)
-                    | (byte_bits[1] << 6)
-                    | (byte_bits[2] << 5)
-                    | (byte_bits[3] << 4)
-                    | (byte_bits[4] << 3)
-                    | (byte_bits[5] << 2)
-                    | (byte_bits[6] << 1)
-                    | byte_bits[7];
+                let byte_bits: &[usize; 8] = unsafe { byte_bits.try_into().unwrap_unchecked() };
+                let byte = unsafe {
+                    PRESHIFTED7.get_unchecked(byte_bits[0])
+                        | PRESHIFTED6.get_unchecked(byte_bits[1])
+                        | PRESHIFTED5.get_unchecked(byte_bits[2])
+                        | PRESHIFTED4.get_unchecked(byte_bits[3])
+                        | PRESHIFTED3.get_unchecked(byte_bits[4])
+                        | PRESHIFTED2.get_unchecked(byte_bits[5])
+                        | PRESHIFTED1.get_unchecked(byte_bits[6])
+                        | PRESHIFTED0.get_unchecked(byte_bits[7])
+                };
                 let offset = self.bits_written / 8;
                 #[cfg(test)]
                 {
