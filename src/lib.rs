@@ -143,20 +143,19 @@ impl Encoder {
             {
                 self.bytes_in += 1;
             }
-            #[cfg(test)]
-            {
-                self.weights[byte as usize] += 1;
-                self.word_batch.push(byte);
+            // SAFETY:
+            // we know weights is 256 elements long and is indexed by a u8 [0..256]
+            // we know word_batch is < len because we check it below
+            // we can't use get_unchecked_mut because we have uninitialized memory
+            unsafe {
+                let weights_ptr = self.weights.as_mut_ptr();
+                let word_batch_ptr = self.word_batch.as_mut_ptr();
+                *weights_ptr.add(byte as usize) += 1;
+                let idx = self.word_batch.len();
+                *word_batch_ptr.add(idx) = byte;
+                self.word_batch.set_len(idx + 1);
             }
-            #[cfg(not(test))]
-            {
-                unsafe {
-                    *self.weights.get_unchecked_mut(byte as usize) += 1;
-                    let idx = self.word_batch.len();
-                    *self.word_batch.get_unchecked_mut(idx) = byte;
-                    self.word_batch.set_len(idx + 1);
-                }
-            }
+            // }
 
             // Hot path for encoding data
             if matches!(self.state, EncodeState::Data) & (self.word_batch.len() < self.page_size) {
