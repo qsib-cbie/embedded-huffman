@@ -20,7 +20,7 @@ fuzz_target!(|data: &[u8]| {
         Box::pin(async move {
             let mut buf = buf.borrow_mut();
             buf.extend_from_slice(page);
-            Ok(())
+            Ok(true)
         })
     });
     let mut wtr = BufferedPageWriter::new(PAGE_SIZE, flush_page);

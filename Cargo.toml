@@ -1,6 +1,6 @@
 [package]
 name = "embedded-huffman"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Jacob Trueb <jtrueb@northwestern.edu>"]
 description = "A paginated, streaming library for Huffman coding on embedded."

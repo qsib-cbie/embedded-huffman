@@ -131,12 +131,21 @@ impl Encoder {
     ) -> Result<bool, E> {
         let finish = if let Some(byte) = byte {
             // Optimized for Cortex-M4 where there is no branch prediction
-            unsafe {
-                self.bytes_in += 1;
-                *self.weights.get_unchecked_mut(byte as usize) += 1;
-                let idx = self.word_batch.len();
-                *self.word_batch.get_unchecked_mut(idx) = byte;
-                self.word_batch.set_len(idx + 1);
+            self.bytes_in += 1;
+            #[cfg(debug_assertions)]
+            {
+                // false positive on undefined behavior bounds checking on slice indexing
+                self.weights[byte as usize] += 1;
+                self.word_batch.push(byte);
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                unsafe {
+                    *self.weights.get_unchecked_mut(byte as usize) += 1;
+                    let idx = self.word_batch.len();
+                    *self.word_batch.get_unchecked_mut(idx) = byte;
+                    self.word_batch.set_len(idx + 1);
+                }
             }
 
             // Hot path for encoding data
