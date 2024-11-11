@@ -124,6 +124,12 @@ Run the test suite with:
 cargo test
 ```
 
+### Fuzzing
+
+Fuzzing ran for 4 days on Mac Studio `cargo +nightly fuzz run fuzz_target_1 -- -max_len=10000000 -jobs=20`
+
+The fuzz test included a roundtrip of bytes through the encoder and decoder.
+
 ## CLI Installation
 
 ```bash
