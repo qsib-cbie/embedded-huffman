@@ -131,8 +131,24 @@ fn main() {
                 match stdin.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        for byte in &buf[..n] {
-                            encoder.sink(*byte, &mut wtr).await.unwrap();
+                        let bytes = &buf[..n];
+                        for bytes in bytes.chunks(64) {
+                            if encoder.batch_fits(bytes.len()) {
+                                let bytes_array: Result<&[u8; 64], _> = bytes.try_into();
+                                if let Ok(bytes) = bytes_array {
+                                    unsafe {
+                                        encoder.batch_sink(bytes);
+                                    }
+                                } else {
+                                    unsafe {
+                                        encoder.batch_sink(bytes);
+                                    }
+                                }
+                            } else {
+                                for byte in bytes {
+                                    encoder.sink(*byte, &mut wtr).await.unwrap();
+                                }
+                            }
                         }
                     }
                     Err(e) => {

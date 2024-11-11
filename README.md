@@ -109,6 +109,15 @@ The library includes benchmarks for compression and decompression performance. R
 cargo bench --all-features
 ```
 
+Results can be better on Mac Studio, but the current optimizations were best for Cortex-M4 with manual benchmarking.
+
+```
+compression        fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ batch_compress  8.161 ms      │ 8.81 ms       │ 8.395 ms      │ 8.351 ms      │ 100     │ 100
+├─ compress        12.57 ms      │ 13.21 ms      │ 13.04 ms      │ 12.97 ms      │ 100     │ 100
+╰─ decompress      27.29 ms      │ 30.85 ms      │ 27.49 ms      │ 27.88 ms      │ 100     │ 100
+```
+
 ## Testing
 
 The codebase includes:

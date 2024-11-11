@@ -120,6 +120,36 @@ impl Encoder {
         self.bytes_in as f32 / self.bytes_out as f32
     }
 
+    #[inline(always)]
+    /// Check if a batch of bytes fits in the current batch
+    pub fn batch_fits(&self, bytes: usize) -> bool {
+        self.word_batch.len() + bytes < self.page_size
+    }
+
+    #[inline(always)]
+    /// Sink a batch of bytes without checking if the batch fits
+    pub unsafe fn batch_sink(&mut self, bytes: &[u8]) {
+        // Optimized for Cortex-M4 where there is no branch prediction
+        #[cfg(feature = "ratio")]
+        {
+            self.bytes_in += bytes.len();
+        }
+        // SAFETY:
+        // we know weights is 256 elements long and is indexed by a u8 [0..256]
+        // we know word_batch is < len because we check it below
+        // we can't use get_unchecked_mut because we have uninitialized memory
+        let weights_ptr = self.weights.as_mut_ptr();
+        let word_batch_ptr = self.word_batch.as_mut_ptr();
+        for byte in bytes {
+            *weights_ptr.add(*byte as usize) += 1;
+        }
+        let idx = self.word_batch.len();
+        let dst = word_batch_ptr.add(idx);
+        let src = bytes.as_ptr();
+        copy_nonoverlapping(src, dst, bytes.len());
+        self.word_batch.set_len(idx + bytes.len());
+    }
+
     /// Put a byte into the encoder
     #[inline(always)]
     pub async fn sink<E>(&mut self, byte: u8, output: &mut impl PageWriter<E>) -> Result<bool, E> {
@@ -155,7 +185,6 @@ impl Encoder {
                 *word_batch_ptr.add(idx) = byte;
                 self.word_batch.set_len(idx + 1);
             }
-            // }
 
             // Hot path for encoding data
             if matches!(self.state, EncodeState::Data) & (self.word_batch.len() < self.page_size) {

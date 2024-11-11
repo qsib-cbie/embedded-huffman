@@ -48,6 +48,61 @@ fn compress(bencher: Bencher) {
 }
 
 #[divan::bench]
+fn batch_compress(bencher: Bencher) {
+    // Generate test data - 1MB of pseudo-random bytes
+    let test_data: Vec<u8> = (0..1024 * 1024).map(|i| ((i * 31) % 256) as u8).collect();
+
+    // Set up shared buffer and readers/writers
+    let buf: Vec<u8> = Vec::new();
+    let buf = Rc::new(RefCell::new(buf));
+    let wtr_buf = buf.clone();
+
+    let flush_page: WritePageFutureFn<()> = Box::new(move |page| {
+        let buf = wtr_buf.clone();
+        Box::pin(async move {
+            let mut buf = buf.borrow_mut();
+            buf.extend_from_slice(page);
+            Ok(true)
+        })
+    });
+
+    const PAGE_SIZE: usize = 2048;
+    const PAGE_THRESHOLD: usize = 1024;
+    let mut wtr = BufferedPageWriter::new(PAGE_SIZE, flush_page);
+    let mut encoder = Encoder::new(PAGE_SIZE, PAGE_THRESHOLD);
+
+    bencher.bench_local(move || {
+        // Reset state
+        buf.borrow_mut().clear();
+        encoder.reset();
+        wtr.reset();
+
+        // Compress
+        smol::block_on(async {
+            for values in test_data.chunks(32) {
+                if encoder.batch_fits(values.len()) {
+                    let bytes_array: Result<&[u8; 32], _> = values.try_into();
+                    if let Ok(bytes) = bytes_array {
+                        unsafe {
+                            encoder.batch_sink(bytes);
+                        }
+                    } else {
+                        unsafe {
+                            encoder.batch_sink(values);
+                        }
+                    }
+                } else {
+                    for value in values {
+                        encoder.sink(*value, &mut wtr).await.unwrap();
+                    }
+                }
+            }
+            encoder.flush(&mut wtr).await.unwrap();
+        });
+    });
+}
+
+#[divan::bench]
 fn decompress(bencher: Bencher) {
     // Generate test data - 1MB of pseudo-random bytes
     let test_data: Vec<u8> = (0..1024 * 1024).map(|i| ((i * 31) % 256) as u8).collect();
